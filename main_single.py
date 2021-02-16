@@ -139,6 +139,18 @@ class DiceLoss(nn.Module):
         return 1. - dsc
 
 
+class MultiDiceLoss(nn.Module):
+
+    def __init__(self):
+        super(MultiDiceLoss, self).__init__()
+        self.smooth = 1.0
+
+    def forward(self, y_pred, y_true):
+        for some_channel in range(y_pred.shape[2]):
+            print('a')
+        return 0
+
+
 def iou_score(output, target, in_loss_func=False):
     smooth = 1e-5
     if not in_loss_func:
@@ -159,16 +171,43 @@ class BCEDiceLoss(nn.Module):
         super(BCEDiceLoss, self).__init__()
 
     def forward(self, input, target):
-        bce = F.binary_cross_entropy_with_logits(input, target, reduction="mean")
-        iou = iou_score(input, target, True)
-        smooth = 1e-5
-        input = torch.sigmoid(input)
-        num = target.size(0)
-        input = input.view(num, -1)
-        target = target.view(num, -1)
-        intersection = (input * target).sum()
-        dice = 1 - (2. * intersection + smooth) / (input.sum() + target.sum() + smooth)
-        return bce + dice + (1 - iou)
+        the_loss_func = 0.0
+        for the_channels in range(input.shape[1]):
+            label_in_a_channel = torch.where(target == the_channels, 1.0, 0.0)
+            pred_in_a_channel = input[:, the_channels, :, :]
+            bce = F.binary_cross_entropy_with_logits(pred_in_a_channel, label_in_a_channel)
+            smooth = 1e-5
+            pred_in_a_channel = torch.sigmoid(pred_in_a_channel)
+            num = label_in_a_channel.size(0)
+            pred_in_a_channel = pred_in_a_channel.view(num, -1)
+            label_in_a_channel = label_in_a_channel.view(num, -1)
+            intersection = (pred_in_a_channel * label_in_a_channel)
+            dice = (2. * intersection.sum(1) + smooth) / (pred_in_a_channel.sum(1) + label_in_a_channel.sum(1) + smooth)
+            dice = 1 - dice.sum() / num
+            the_loss_func += 0.5 * bce + dice
+        return the_loss_func
+
+
+class DiceonlyLoss(nn.Module):
+    def __init__(self):
+        super(DiceonlyLoss, self).__init__()
+
+    def forward(self, input, target):
+        the_loss_func = []
+        for the_channels in range(input.shape[1]):
+            label_in_a_channel = torch.where(target == the_channels, 1.0, 0.0)
+            pred_in_a_channel = input[:, the_channels, :, :]
+            smooth = 1e-5
+            pred_in_a_channel = torch.sigmoid(pred_in_a_channel)
+            num = label_in_a_channel.size(0)
+            pred_in_a_channel = pred_in_a_channel.view(num, -1)
+            label_in_a_channel = label_in_a_channel.view(num, -1)
+            intersection = (pred_in_a_channel * label_in_a_channel)
+            dice = (2. * intersection.sum(1) + smooth) / (pred_in_a_channel.sum(1) + label_in_a_channel.sum(1) + smooth)
+            dice = dice.to('cpu').detach().numpy().copy()
+            the_loss_func.append(np.sum(dice) / num)
+
+        return the_loss_func
 
 
 class multi_class_loss(nn.Module):
@@ -196,7 +235,7 @@ class my_dataset(Dataset):
 
 def main():
     batchsize = 6
-    num_epochs = 50
+    num_epochs = 10
     learning_rate = 0.0001
     loss_list, iteration_list, accuracy_list = [], [], []
     count = 0
@@ -209,11 +248,14 @@ def main():
     # data_iter = iter(dataloader)
     # timgs, tlabels = data_iter.next()
 
-    unet = UNet(in_channels=1, out_channels=35).to("cuda")
-    # dsc_loss = BCEDiceLoss()
-    dsc_loss = multi_class_loss()
-    celoss = nn.CrossEntropyLoss()
+    unet = UNet(in_channels=1, out_channels=34).to("cuda")
+    bce_loss = BCEDiceLoss()
+    ver_dice_loss = DiceonlyLoss()
+    # dsc_loss = multi_class_loss()
+    # celoss = nn.CrossEntropyLoss()
     # dsc_loss = DiceLoss()
+    # mdcloss = MultiDiceLoss()
+
     optimizer = torch.optim.Adam(unet.parameters(), lr=learning_rate, weight_decay=0.001)
     # optimizer = torch.optim.SGD(unet.parameters(), lr=learning_rate, momentum=0.9, weight_decay=0.0001)
     torch.backends.cudnn.benchmark = True
@@ -232,7 +274,7 @@ def main():
             optimizer.zero_grad()
             y_pred = unet(img_tnsr)
             # loss = dsc_loss(y_pred, mask_tnsr)
-            loss = celoss(y_pred, mask_tnsr.view(-1, 600, 600).long())
+            loss = bce_loss(y_pred, mask_tnsr.view(-1, 600, 600).long())
             loss.backward()
             optimizer.step()
             count += 1
@@ -246,11 +288,18 @@ def main():
                     t_pred = unet(timg_tnsr)
                     # tloss = iou_score(t_pred, tmask_tnsr)
                     # tloss = dsc_loss(t_pred, tmask_tnsr)
-                    tloss = celoss(t_pred, tmask_tnsr.view(-1, 600, 600).long())
+                    tloss = ver_dice_loss(t_pred, tmask_tnsr.view(-1, 600, 600).long())
+                    tloss = np.array(tloss)
+                    if j == 0:
+                        tlosss = tloss
+                    else:
+                        tlosss += tloss
 
                     timg = timg.view(-1, 1, 600, 600).to("cpu").detach().numpy()
                     tmask = tmask.view(-1, 1, 600, 600).to("cpu").detach().numpy()
                     # t_pred = t_pred.view(-1, 1,  600, 600).to("cpu").detach().numpy()
+                    # val_dice_loss = mdcloss(t_pred, tmask)
+                    # val_iou_loss = iou_score(t_pred, tmask)
                     fig = plt.figure(figsize=(20, 12))
                     ax1 = fig.add_subplot(121)
                     ax2 = fig.add_subplot(122)
@@ -267,8 +316,11 @@ def main():
                     ax2.imshow(tmask[0, 0, :, :], alpha=0.5, cmap="jet", vmin=0.5, vmax=35)
                     fig.savefig(results_folder + str(j) + ".png")
                     plt.close()
+                tlosss = tlosss / (j + 1)
 
-                print("Epoch {}, Iter. {}, Loss {:.8f}, Cr.E.loss {:.8f}".format(epoch, count, loss.data, tloss))
+                print("Epoch {}, Iter. {}, Loss {:.8f}".format(epoch, count, loss.data))
+                # print(tlosss)
+                np.savetxt(results_folder + "dices.txt", tlosss)
 
 
 if __name__ == "__main__":
